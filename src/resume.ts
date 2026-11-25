@@ -4,12 +4,14 @@ import {
     BaseTabComponent,
     ConfigService,
     GetRecoveryTokenOptions,
+    LogService,
+    Logger,
     RecoveryToken,
     TabRecoveryService,
 } from 'tabby-core'
 import { BaseTerminalTabComponent, TerminalDecorator } from 'tabby-terminal'
 
-export const OSC_CODE = 7770
+export const OSC_TITLE_PREFIX = '__PI_RESUME__:'
 const PATCHED_FLAG = Symbol('piCompanionRecoveryPatched')
 const OUTPUT_SETTLE_MS = 600
 const FALLBACK_DELAY_MS = 3500
@@ -17,7 +19,7 @@ const FALLBACK_DELAY_MS = 3500
 export interface PiResumeState {
     v: 1
     cwd: string
-    sessionFile: string
+    sessionFile?: string
     sessionId?: string
 }
 
@@ -26,47 +28,60 @@ export type ParsedOscPayload =
     | { action: 'clear' }
     | null
 
-/**
- * Parses an OSC 7770 payload emitted by the pi tabby-resume extension.
- */
-export function parseOscPayload(data: string): ParsedOscPayload {
-    if (!data || typeof data !== 'string') {
-        return null
-    }
-    if (data === 'pi-resume;clear') {
-        return { action: 'clear' }
-    }
-    const prefix = 'pi-resume;start;'
-    if (!data.startsWith(prefix)) {
-        return null
-    }
-    const b64 = data.slice(prefix.length)
+function decodeBase64State(b64: string): ParsedOscPayload {
     if (!b64) {
         return null
     }
     try {
         const jsonStr = Buffer.from(b64, 'base64').toString('utf8')
         const parsed = JSON.parse(jsonStr)
-        if (
-            parsed &&
-            typeof parsed === 'object' &&
-            typeof parsed.cwd === 'string' &&
-            parsed.cwd.length > 0 &&
-            typeof parsed.sessionFile === 'string' &&
-            parsed.sessionFile.length > 0
-        ) {
-            return {
-                action: 'start',
-                state: {
-                    v: 1,
-                    cwd: parsed.cwd,
-                    sessionFile: parsed.sessionFile,
-                    sessionId: typeof parsed.sessionId === 'string' ? parsed.sessionId : undefined,
-                },
-            }
+        if (!parsed || typeof parsed !== 'object') {
+            return null
+        }
+        const cwd = typeof parsed.c === 'string' ? parsed.c : parsed.cwd
+        const sessionFile = typeof parsed.f === 'string' ? parsed.f : parsed.sessionFile
+        const sessionId = typeof parsed.i === 'string' ? parsed.i : parsed.sessionId
+
+        if (typeof cwd !== 'string' || cwd.length === 0) {
+            return null
+        }
+        const hasFile = typeof sessionFile === 'string' && sessionFile.length > 0
+        const hasId = typeof sessionId === 'string' && sessionId.length > 0
+        if (!hasFile && !hasId) {
+            return null
+        }
+        return {
+            action: 'start',
+            state: {
+                v: 1,
+                cwd,
+                ...(hasFile ? { sessionFile } : {}),
+                ...(hasId ? { sessionId } : {}),
+            },
         }
     } catch {
         return null
+    }
+}
+
+/**
+ * Parses an OSC payload emitted by the pi tabby-resume extension.
+ * Supports both OSC 0/2 (__PI_RESUME__:...) and legacy OSC 7770 (pi-resume;...).
+ */
+export function parseOscPayload(data: string): ParsedOscPayload {
+    if (!data || typeof data !== 'string') {
+        return null
+    }
+    if (data === `${OSC_TITLE_PREFIX}clear` || data === 'pi-resume;clear') {
+        return { action: 'clear' }
+    }
+    const titleStartPrefix = `${OSC_TITLE_PREFIX}start:`
+    if (data.startsWith(titleStartPrefix)) {
+        return decodeBase64State(data.slice(titleStartPrefix.length))
+    }
+    const legacyStartPrefix = 'pi-resume;start;'
+    if (data.startsWith(legacyStartPrefix)) {
+        return decodeBase64State(data.slice(legacyStartPrefix.length))
     }
     return null
 }
@@ -83,16 +98,30 @@ function escapeWindowsDoubleQuoted(value: string): string {
  * Builds the shell command used to restore a pi session in its original directory.
  */
 export function buildResumeCommand(state: PiResumeState): string {
-    const isPosix = state.cwd.startsWith('/') || state.sessionFile.startsWith('/')
+    const target = state.sessionFile || state.sessionId
+    const isPosix = state.cwd.startsWith('/') || !!state.sessionFile?.startsWith('/')
     if (isPosix) {
         // Leading space keeps bash history clean when ignorespace/ignoreboth is enabled.
         const cwd = escapePosixSingleQuoted(state.cwd)
-        const session = escapePosixSingleQuoted(state.sessionFile)
+        if (!target) {
+            return ` cd '${cwd}' && pi -c\r`
+        }
+        const session = escapePosixSingleQuoted(target)
         return ` cd '${cwd}' && pi --session '${session}'\r`
     }
     const cwd = escapeWindowsDoubleQuoted(state.cwd)
-    const session = escapeWindowsDoubleQuoted(state.sessionFile)
+    if (!target) {
+        return `cd /d "${cwd}" && pi -c\r`
+    }
+    const session = escapeWindowsDoubleQuoted(target)
     return `cd /d "${cwd}" && pi --session "${session}"\r`
+}
+
+function isTerminalControlReply(data: Buffer | string): boolean {
+    if (typeof data === 'string') {
+        return data.length > 0 && data.charCodeAt(0) === 0x1b
+    }
+    return Buffer.isBuffer(data) && data.length > 0 && data[0] === 0x1b
 }
 
 /**
@@ -101,6 +130,11 @@ export function buildResumeCommand(state: PiResumeState): string {
 @Injectable()
 export class PiResumeStore {
     private states = new WeakMap<BaseTabComponent, PiResumeState>()
+    private logger: Logger
+
+    constructor(log: LogService) {
+        this.logger = log.create('piCompanion')
+    }
 
     get(tab: BaseTabComponent): PiResumeState | undefined {
         return this.states.get(tab)
@@ -131,6 +165,7 @@ export class PiResumeStore {
                 const state = this.states.get(tab)
                 if (state) {
                     (token as any).piResume = state
+                    this.logger.info('Saved piResume into recovery token', state)
                 }
             }
             return token
@@ -141,6 +176,7 @@ export class PiResumeStore {
             const tabParams = await origRecoverTab(token)
             const piResume = (token as any)?.piResume
             if (tabParams && piResume && typeof piResume === 'object') {
+                this.logger.info('Restoring piResume from recovery token', piResume)
                 tabParams.inputs = {
                     ...(tabParams.inputs ?? {}),
                     __piResume: piResume,
@@ -156,20 +192,24 @@ interface AttachmentCleanup {
     oscDisposables: Array<{ dispose(): void }>
     timers: ReturnType<typeof setTimeout>[]
     cancelled: boolean
+    oscRegistered: boolean
 }
 
 /**
- * Listens for OSC 7770 pi session signals and triggers auto-resume on recovered tabs.
+ * Listens for pi session OSC signals and triggers auto-resume on recovered tabs.
  */
 @Injectable()
 export class PiResumeTerminalDecorator extends TerminalDecorator {
     private cleanups = new WeakMap<BaseTerminalTabComponent<any>, AttachmentCleanup>()
+    private logger: Logger
 
     constructor(
         private store: PiResumeStore,
         private config: ConfigService,
+        log: LogService,
     ) {
         super()
+        this.logger = log.create('piCompanion')
     }
 
     attach(terminal: BaseTerminalTabComponent<any>): void {
@@ -180,12 +220,13 @@ export class PiResumeTerminalDecorator extends TerminalDecorator {
             oscDisposables: [],
             timers: [],
             cancelled: false,
+            oscRegistered: false,
         }
         this.cleanups.set(terminal, cleanup)
 
-        // Part A: Listen for OSC 7770 from pi extension.
+        // Part A: Listen for pi resume signals via OSC 0/2 (ConPTY-safe) and OSC 7770.
         const registerOsc = () => {
-            if (cleanup.cancelled) {
+            if (cleanup.cancelled || cleanup.oscRegistered) {
                 return
             }
             const xterm = (terminal.frontend as any)?.xterm
@@ -193,21 +234,38 @@ export class PiResumeTerminalDecorator extends TerminalDecorator {
             if (typeof registerOscHandler !== 'function') {
                 return
             }
-            const disposable = registerOscHandler.call(xterm.parser, OSC_CODE, (data: string) => {
+            cleanup.oscRegistered = true
+
+            const handleOsc = (data: string, isTitleOsc: boolean): boolean => {
+                if (isTitleOsc && !data.startsWith(OSC_TITLE_PREFIX)) {
+                    return false
+                }
                 const parsed = parseOscPayload(data)
                 if (!parsed) {
-                    return false
+                    return isTitleOsc && data.startsWith(OSC_TITLE_PREFIX)
                 }
                 if (parsed.action === 'start') {
                     this.store.set(terminal, parsed.state)
+                    this.logger.info('Captured pi session state via OSC', parsed.state)
                 } else {
                     this.store.clear(terminal)
+                    this.logger.info('Cleared pi session state via OSC')
                 }
                 ;(terminal as any).recoveryStateChangedHint?.next()
                 return true
-            })
-            if (disposable && typeof disposable.dispose === 'function') {
-                cleanup.oscDisposables.push(disposable)
+            }
+
+            for (const [code, isTitleOsc] of [
+                [0, true],
+                [2, true],
+                [7770, false],
+            ] as const) {
+                const disposable = registerOscHandler.call(xterm.parser, code, (data: string) =>
+                    handleOsc(data, isTitleOsc),
+                )
+                if (disposable && typeof disposable.dispose === 'function') {
+                    cleanup.oscDisposables.push(disposable)
+                }
             }
         }
 
@@ -225,6 +283,7 @@ export class PiResumeTerminalDecorator extends TerminalDecorator {
         if (pending && this.config.store?.piCompanion?.autoResume !== false) {
             // Preserve state immediately in case Tabby is terminated again before pi emits OSC.
             this.store.set(terminal, pending)
+            this.logger.info('Scheduled pi auto-resume for recovered tab', pending)
             this.scheduleResume(terminal, pending, cleanup)
         }
     }
@@ -256,8 +315,10 @@ export class PiResumeTerminalDecorator extends TerminalDecorator {
             }
             fired = true
             clearResumeTimersAndSubs()
+            const cmd = buildResumeCommand(pending)
+            this.logger.info('Sending pi resume command', cmd.trim())
             if (typeof terminal.sendInput === 'function') {
-                terminal.sendInput(buildResumeCommand(pending))
+                terminal.sendInput(cmd)
             }
         }
 
@@ -267,10 +328,15 @@ export class PiResumeTerminalDecorator extends TerminalDecorator {
             }
             fired = true
             clearResumeTimersAndSubs()
+            this.logger.info('Cancelled pi auto-resume due to user input')
         }
 
-        // Cancel auto-resume if the user types manually before it runs.
-        inputSub = terminal.input$.subscribe(() => cancelResume())
+        // Cancel auto-resume on actual user typing, ignoring ESC-prefixed terminal query replies.
+        inputSub = terminal.input$.subscribe((data) => {
+            if (!isTerminalControlReply(data)) {
+                cancelResume()
+            }
+        })
         cleanup.subscriptions.push(inputSub)
 
         const attachToSession = (session: NonNullable<BaseTerminalTabComponent<any>['session']>) => {

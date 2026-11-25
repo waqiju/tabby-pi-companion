@@ -13,13 +13,13 @@ Companion plugin for [Tabby Terminal](https://tabby.sh/) and the `pi` coding age
   - Forwards `Ctrl+Enter` as `\x1b[13;5u` (Kitty keyboard protocol) to the focused terminal pane, enabling multiline vs. submit distinction in `pi` TUI extensions (e.g., `smart-enter`).
   - Customizable or removable anytime in **Settings → Hotkeys → Send Ctrl+Enter (CSI 13;5u)**.
 
-## How Auto-Resume Works (OSC `7770`)
+## How Auto-Resume Works (ConPTY-safe OSC `0`)
 
 1. The bundled `pi` extension (`pi-extension/tabby-resume.ts`) hooks `session_start`, `turn_end`, and `session_shutdown`.
-2. In interactive `tui` mode, it writes an OSC `7770` sequence to `stdout`:
-   - Start/update: `\x1b]7770;pi-resume;start;<base64-json>\x07` where `<base64-json>` encodes `{ v: 1, cwd, sessionFile, sessionId }`.
-   - Clean exit (`reason === "quit"`): `\x1b]7770;pi-resume;clear\x07`.
-3. `PiResumeTerminalDecorator` listens for OSC `7770` via `xterm.parser.registerOscHandler(7770, ...)` and updates the per-tab state in `PiResumeStore`, pinging `recoveryStateChangedHint` so Tabby persists `localStorage.tabsRecovery`.
+2. In interactive `tui` mode, it writes an OSC `0` control sequence to `stdout` (chosen because Windows ConPTY strips custom OSC codes like `7770`, while reliably forwarding OSC `0`):
+   - Start/update: `\x1b]0;__PI_RESUME__:start:<base64-json>\x07` where `<base64-json>` encodes compact `{ c: cwd, f: sessionFile }` (falling back to `{ c: cwd, i: sessionId }` if the path would exceed ConPTY's title limit).
+   - Clean exit (`reason === "quit"`): `\x1b]0;__PI_RESUME__:clear\x07`.
+3. `PiResumeTerminalDecorator` registers `xterm.parser.registerOscHandler(0, ...)` (and `2` / `7770`), silently swallowing `__PI_RESUME__:` payloads before they touch the tab title, and updates `PiResumeStore` + `recoveryStateChangedHint` so Tabby persists `localStorage.tabsRecovery`.
 4. `TabRecoveryService` is wrapped to attach `piResume` only when `includeState` is true (preserving normal tab duplication) and pass `__piResume` into recovered terminal tab inputs on startup.
 5. Once the recovered terminal's session produces its first output (600ms settle, or 3.5s fallback), the plugin injects the resume command into the PTY.
 
