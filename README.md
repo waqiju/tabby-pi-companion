@@ -12,6 +12,9 @@ Companion plugin for [Tabby Terminal](https://tabby.sh/) and the `pi` coding age
 - **Send Ctrl+Enter (`CSI 13;5u`)** (`Ctrl-Enter` by default):
   - Forwards `Ctrl+Enter` as `\x1b[13;5u` (Kitty keyboard protocol) to the focused terminal pane, enabling multiline vs. submit distinction in `pi` TUI extensions (e.g., `smart-enter`).
   - Customizable or removable anytime in **Settings → Hotkeys → Send Ctrl+Enter (CSI 13;5u)**.
+- **Normalize Windows Paste Newlines**:
+  - Converts bare LF (`\n`) in clipboard text to CRLF (`\r\n`) on Windows before Tabby's paste handler converts `\r\n` to `\r`.
+  - Prevents bare `\n` from Linux/WSL tools (e.g., `pi-session-manager` Ctrl+Y) or Electron apps (e.g., Feishu) from reaching Windows ConPTY, which otherwise translates `0x0A` into Ctrl+Enter Kitty sequences (`[13;5u[57442;1:3u`).
 
 ## How Auto-Resume Works (ConPTY-safe OSC `0`)
 
@@ -30,6 +33,7 @@ In Tabby's config (`config.yaml`):
 ```yaml
 piCompanion:
   autoResume: true # set to false to disable auto-resume while keeping Ctrl+Enter
+  normalizePasteNewlines: true # set to false to disable Windows bare-LF paste normalization
 ```
 
 ## Development & Deployment

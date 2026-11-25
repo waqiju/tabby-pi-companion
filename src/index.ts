@@ -3,6 +3,8 @@ import { Subject, takeUntil } from 'rxjs'
 import {
     AppService,
     ConfigProvider,
+    ConfigService,
+    HostAppService,
     HotkeyDescription,
     HotkeyProvider,
     HotkeysService,
@@ -10,6 +12,7 @@ import {
 } from 'tabby-core'
 import { TerminalDecorator } from 'tabby-terminal'
 import { CTRL_ENTER_HOTKEY_ID, sendCtrlEnter } from './ctrlEnter'
+import { patchWindowsPasteNewlines } from './pasteNewlines'
 import { PiResumeStore, PiResumeTerminalDecorator } from './resume'
 
 @Injectable()
@@ -20,6 +23,7 @@ export class PiCompanionConfigProvider extends ConfigProvider {
         },
         piCompanion: {
             autoResume: true,
+            normalizePasteNewlines: true,
         },
     }
 }
@@ -45,7 +49,10 @@ export class PiCompanionService implements OnDestroy {
         hotkeys: HotkeysService,
         tabRecovery: TabRecoveryService,
         store: PiResumeStore,
+        hostApp: HostAppService,
+        config: ConfigService,
     ) {
+        patchWindowsPasteNewlines(hostApp, config)
         store.patchTabRecovery(tabRecovery)
         hotkeys.hotkey$
             .pipe(takeUntil(this.destroyed$))
