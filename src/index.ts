@@ -1,4 +1,4 @@
-import { Injectable, NgModule, OnDestroy } from '@angular/core'
+import { Injectable, Injector, NgModule, OnDestroy } from '@angular/core'
 import { Subject, takeUntil } from 'rxjs'
 import {
     AppService,
@@ -8,11 +8,13 @@ import {
     HotkeyDescription,
     HotkeyProvider,
     HotkeysService,
+    LogService,
     TabRecoveryService,
 } from 'tabby-core'
 import { TerminalDecorator } from 'tabby-terminal'
 import { CTRL_ENTER_HOTKEY_ID, sendCtrlEnter } from './ctrlEnter'
 import { patchWindowsPasteNewlines } from './pasteNewlines'
+import { patchLocalPtySpawn } from './ptyEnv'
 import { PiResumeStore, PiResumeTerminalDecorator } from './resume'
 
 @Injectable()
@@ -51,8 +53,11 @@ export class PiCompanionService implements OnDestroy {
         store: PiResumeStore,
         hostApp: HostAppService,
         config: ConfigService,
+        injector: Injector,
+        log: LogService,
     ) {
         patchWindowsPasteNewlines(hostApp, config)
+        patchLocalPtySpawn(injector, hostApp, config, log)
         store.patchTabRecovery(tabRecovery)
         hotkeys.hotkey$
             .pipe(takeUntil(this.destroyed$))

@@ -18,13 +18,14 @@ Companion plugin for [Tabby Terminal](https://tabby.sh/) and the `pi` coding age
 
 ## How Auto-Resume Works (ConPTY-safe OSC `0`)
 
-1. The bundled `pi` extension (`pi-extension/tabby-resume.ts`) hooks `session_start`, `turn_end`, and `session_shutdown`.
-2. In interactive `tui` mode, it writes an OSC `0` control sequence to `stdout` (chosen because Windows ConPTY strips custom OSC codes like `7770`, while reliably forwarding OSC `0`):
+1. When `autoResume` is enabled, `tabby-pi-companion` wraps `PTYInterface.spawn` to inject `TABBY_PI_COMPANION=1` into Tabby-spawned local/WSL PTYs (and appends `TABBY_PI_COMPANION/u` to `WSLENV` on Windows so WSL guest shells inherit it).
+2. The bundled `pi` extension (`pi-extension/tabby-resume.ts`) checks `TABBY_PI_COMPANION === "1"` (and ensures it is not inside `tmux`/`screen`) before activating; outside Tabby (e.g., Windows Terminal, VS Code, tmux/screen) or when `autoResume: false`, it is a complete no-op and writes no OSC sequences.
+3. When active in interactive `tui` mode, it hooks `session_start`, `turn_end`, and `session_shutdown`, writing an OSC `0` control sequence to `stdout` (chosen because Windows ConPTY strips custom OSC codes like `7770`, while reliably forwarding OSC `0`):
    - Start/update: `\x1b]0;__PI_RESUME__:start:<base64-json>\x07` where `<base64-json>` encodes compact `{ c: cwd, f: sessionFile }` (falling back to `{ c: cwd, i: sessionId }` if the path would exceed ConPTY's title limit).
    - Clean exit (`reason === "quit"`): `\x1b]0;__PI_RESUME__:clear\x07`.
-3. `PiResumeTerminalDecorator` registers `xterm.parser.registerOscHandler(0, ...)` (and `2` / `7770`), silently swallowing `__PI_RESUME__:` payloads before they touch the tab title, and updates `PiResumeStore` + `recoveryStateChangedHint` so Tabby persists `localStorage.tabsRecovery`.
-4. `TabRecoveryService` is wrapped to attach `piResume` only when `includeState` is true (preserving normal tab duplication) and pass `__piResume` into recovered terminal tab inputs on startup.
-5. Once the recovered terminal's session produces its first output (600ms settle, or 3.5s fallback), the plugin injects the resume command into the PTY.
+4. `PiResumeTerminalDecorator` registers `xterm.parser.registerOscHandler(0, ...)` (and `2` / `7770`), silently swallowing `__PI_RESUME__:` payloads before they touch the tab title, and updates `PiResumeStore` + `recoveryStateChangedHint` so Tabby persists `localStorage.tabsRecovery`.
+5. `TabRecoveryService` is wrapped to attach `piResume` only when `includeState` is true (preserving normal tab duplication) and pass `__piResume` into recovered terminal tab inputs on startup.
+6. Once the recovered terminal's session produces its first output (600ms settle, or 3.5s fallback), the plugin injects the resume command into the PTY.
 
 ## Configuration
 

@@ -5,7 +5,22 @@ const OSC_SUFFIX = "\x07";
 const STARTUP_DELAY_MS = 350;
 const MAX_COMPACT_B64_LEN = 200;
 
+function isTabbyCompanionActive(): boolean {
+  if (process.env.TABBY_PI_COMPANION !== "1") {
+    return false;
+  }
+  // Avoid polluting tmux/screen titles when nested inside a Tabby tab.
+  if (process.env.TMUX || process.env.STY) {
+    return false;
+  }
+  return true;
+}
+
 export default function (pi: ExtensionAPI) {
+  if (!isTabbyCompanionActive()) {
+    return;
+  }
+
   let lastEmittedKey: string | null = null;
   let startupTimer: ReturnType<typeof setTimeout> | null = null;
 
